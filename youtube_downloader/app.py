@@ -8,14 +8,22 @@ import subprocess
 import os
 import shutil
 import sys
+import urllib.request
+import zipfile
 
 class YouTubeDownloader:
     def __init__(self, root):
         self.root = root
         self.root.title("YouTube ダウンローダー")
-        self.root.geometry("550x350")
+        self.root.geometry("550x380") # Height increased for progress bar
 
-        self.ffmpeg_dir_path = None
+        # Determine the base directory (especially for PyInstaller)
+        if getattr(sys, 'frozen', False):
+            self.base_dir = os.path.dirname(sys.executable)
+        else:
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        self.ffmpeg_dir_path = os.path.join(self.base_dir, "ffmpeg", "bin")
 
         # --- GUI Elements (Japanese) ---
         self.url_label = ttk.Label(root, text="YouTube URL:")
@@ -45,44 +53,72 @@ class YouTubeDownloader:
         self.browse_button.pack(side=tk.RIGHT, padx=(5,0))
 
         self.download_button = ttk.Button(root, text="ダウンロード", command=self.start_download)
-        self.download_button.pack(pady=20)
+        self.download_button.pack(pady=15)
 
         self.status_label = ttk.Label(root, text="初期化中...")
         self.status_label.pack(pady=5)
+        
+        self.progress = ttk.Progressbar(root, orient="horizontal", length=400, mode="determinate")
+        self.progress.pack(pady=5)
 
         # --- Initialization ---
         self.download_button.config(state="disabled")
         threading.Thread(target=self.setup_ffmpeg, daemon=True).start()
 
     def setup_ffmpeg(self):
-        # 1. Check for existing ffmpeg
-        ffmpeg_exe = shutil.which("ffmpeg")
-        if ffmpeg_exe:
-            self.ffmpeg_dir_path = os.path.dirname(ffmpeg_exe)
-            self.root.after(0, self.update_status, "ffmpeg が見つかりました。準備完了です。")
+        if os.path.exists(os.path.join(self.ffmpeg_dir_path, "ffmpeg.exe")):
+            self.root.after(0, self.update_status, "準備完了です。")
             self.root.after(0, lambda: self.download_button.config(state="normal"))
             return
+        self.root.after(0, self.download_ffmpeg_prompt)
 
-        # 2. If not found, ask to install via Winget
-        self.root.after(0, self.install_ffmpeg_with_winget)
-
-    def install_ffmpeg_with_winget(self):
+    def download_ffmpeg_prompt(self):
         self.update_status("ffmpeg が見つかりません。")
-        if messagebox.askyesno("ffmpeg インストール確認", "動画と音声を結合するために ffmpeg が必要です。\n\nWinget を使用して自動でインストールしますか？"):
-            self.update_status("Winget で ffmpeg をインストールしています...")
-            self.download_button.config(state="disabled")
-            try:
-                # This will open a new terminal for the installation
-                command = "winget install --id=Gyan.FFmpeg -e"
-                subprocess.Popen(command, shell=True)
-                messagebox.showinfo("インストール実行中", f"ffmpeg のインストールを開始しました。\n\nインストールが完了したら、このアプリケーションを一度終了し、再度起動してください。")
-                self.root.destroy() # Close the app after showing info
-            except Exception as e:
-                messagebox.showerror("Winget エラー", f"Winget の実行に失敗しました。Winget がインストールされているか確認してください。\nエラー: {e}")
-                self.update_status("ffmpeg のインストールに失敗しました。")
+        if messagebox.askyesno("ffmpeg インストール確認", "動画と音声を結合するために ffmpeg が必要です。\n\n自動でダウンロードしてセットアップしますか？ (約80MB)"):
+            threading.Thread(target=self.install_ffmpeg_thread, daemon=True).start()
         else:
-            self.update_status("警告: ffmpeg がないため、動画・音声の変換に失敗する可能性があります。")
+            self.update_status("警告: ffmpeg がないため、処理に失敗する可能性があります。")
             self.download_button.config(state="normal")
+
+    def install_ffmpeg_thread(self):
+        try:
+            self.root.after(0, self.update_status, "ffmpeg をダウンロードしています...")
+            self.root.after(0, lambda: self.download_button.config(state="disabled"))
+            ffmpeg_zip_path = os.path.join(self.base_dir, "ffmpeg.zip")
+            ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+            
+            with urllib.request.urlopen(ffmpeg_url) as response, open(ffmpeg_zip_path, 'wb') as out_file:
+                total_size = int(response.info().get('Content-Length', 0))
+                downloaded = 0
+                chunk_size = 8192
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk: break
+                    out_file.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        progress = (downloaded / total_size) * 100
+                        self.root.after(0, self.progress.config, {'value': progress})
+
+            self.root.after(0, self.update_status, "ffmpeg を展開しています...")
+            self.root.after(0, self.progress.config, {'value': 0})
+            extract_dir = os.path.join(self.base_dir, "ffmpeg_temp")
+            with zipfile.ZipFile(ffmpeg_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            
+            extracted_folder = os.path.join(extract_dir, os.listdir(extract_dir)[0])
+            final_ffmpeg_dir = os.path.join(self.base_dir, "ffmpeg")
+            shutil.move(extracted_folder, final_ffmpeg_dir)
+
+            os.remove(ffmpeg_zip_path)
+            shutil.rmtree(extract_dir)
+
+            self.root.after(0, self.update_status, "ffmpeg の準備が完了しました。準備完了です。")
+            self.root.after(0, lambda: self.download_button.config(state="normal"))
+
+        except Exception as e:
+            self.root.after(0, self.update_status, f"ffmpeg のインストールに失敗しました。")
+            messagebox.showerror("エラー", f"ffmpeg のインストールに失敗しました: {e}")
 
     def browse_path(self):
         path = filedialog.askdirectory(initialdir=self.path_var.get())
@@ -96,21 +132,17 @@ class YouTubeDownloader:
             return
         self.download_button.config(state="disabled")
         self.status_label.config(text="ダウンロードを開始しています...")
+        self.progress['value'] = 0
         threading.Thread(target=self.download_thread, args=(url,), daemon=True).start()
 
     def download_thread(self, url):
         try:
             download_format = self.format_var.get()
             download_path = self.path_var.get()
-            
-            command = ["yt-dlp", "--no-mtime"]
-            if self.ffmpeg_dir_path:
-                 # Add ffmpeg to PATH for this process
-                env = os.environ.copy()
-                env["PATH"] = self.ffmpeg_dir_path + os.pathsep + env["PATH"]
-            else:
-                env = os.environ.copy()
+            env = os.environ.copy()
+            env["PATH"] = self.ffmpeg_dir_path + os.pathsep + env["PATH"]
 
+            command = ["yt-dlp", "--no-mtime", "--progress"]
             if download_format in ["mp3", "m4a", "wav"]:
                 command.extend(["-x", "--audio-format", download_format])
             else:
@@ -127,7 +159,15 @@ class YouTubeDownloader:
             while True:
                 output = process.stdout.readline()
                 if output == '' and process.poll() is not None: break
-                if output: self.root.after(0, self.update_status, output.strip())
+                if output:
+                    self.root.after(0, self.update_status, output.strip())
+                    if "[download]" in output:
+                        parts = output.split()
+                        try:
+                            percentage_str = [p for p in parts if p.endswith('%')][0]
+                            percentage = float(percentage_str[:-1])
+                            self.root.after(0, self.progress.config, {'value': percentage})
+                        except (IndexError, ValueError): pass
             
             stderr = process.communicate()[1]
             if process.returncode != 0:
@@ -143,6 +183,7 @@ class YouTubeDownloader:
     def download_complete(self):
         self.status_label.config(text="ダウンロードが完了しました！")
         self.download_button.config(state="normal")
+        self.progress['value'] = 100
         messagebox.showinfo("成功", "ダウンロードが正常に完了しました。")
 
     def download_error(self, error_message):
@@ -154,3 +195,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = YouTubeDownloader(root)
     root.mainloop()
+
